@@ -15,6 +15,41 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import java.util.Currency
 import com.facebook.LoggingBehavior
+import android.os.Handler
+import android.os.Looper
+
+class LogInterceptor(private val channel: MethodChannel) {
+    private var running = false
+
+    fun start() {
+        if (running) return
+        running = true
+
+        Thread {
+            try {
+                // читаем только теги FB SDK
+                val process = Runtime.getRuntime().exec("logcat -s FacebookSDK:D *:S")
+                val reader = process.inputStream.bufferedReader()
+                var line: String?
+                while (running) {
+                    line = reader.readLine()
+                    if (line != null) {
+                        Handler(Looper.getMainLooper()).post {
+                            channel.invokeMethod("onLog", mapOf("message" to line))
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }.start()
+    }
+
+    fun stop() {
+        running = false
+    }
+}
+
 
 /** FacebookAppEventsPlugin */
 class FacebookAppEventsPlugin: FlutterPlugin, MethodCallHandler {
@@ -25,6 +60,7 @@ class FacebookAppEventsPlugin: FlutterPlugin, MethodCallHandler {
   private lateinit var channel : MethodChannel
   private lateinit var appEventsLogger: AppEventsLogger
   private lateinit var anonymousId: String
+  private lateinit var interceptor: LogInterceptor
 
   private val logTag = "FacebookAppEvents"
 
@@ -33,9 +69,13 @@ class FacebookAppEventsPlugin: FlutterPlugin, MethodCallHandler {
     channel.setMethodCallHandler(this)
     appEventsLogger = AppEventsLogger.newLogger(flutterPluginBinding.applicationContext)
     anonymousId = AppEventsLogger.getAnonymousAppDeviceGUID(flutterPluginBinding.applicationContext)
+
+    interceptor = LogInterceptor(channel)
+    interceptor.start()
   }
 
   override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
+    interceptor.stop()
     channel.setMethodCallHandler(null)
   }
 

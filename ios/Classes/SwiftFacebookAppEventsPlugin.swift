@@ -3,18 +3,61 @@ import UIKit
 import FBSDKCoreKit
 import FBSDKCoreKit_Basics
 
-public class SwiftFacebookAppEventsPlugin: NSObject, FlutterPlugin {
-    public static func register(with registrar: FlutterPluginRegistrar) {
-        let channel = FlutterMethodChannel(name: "flutter.oddbit.id/facebook_app_events", binaryMessenger: registrar.messenger())
-        let instance = SwiftFacebookAppEventsPlugin()
+// 🔹 Перехват stderr
+class LogInterceptor {
+    private var pipe: Pipe?
+    private var originalStderr: Int32 = -1
+    private var isCapturing = false
 
-        // Required for FB SDK 9.0, as it does not initialize the SDK automatically any more.
-        // See: https://developers.facebook.com/blog/post/2021/01/19/introducing-facebook-platform-sdk-version-9/
-        // "Removal of Auto Initialization of SDK" section
+    func startCapture(callback: @escaping (String) -> Void) {
+        guard !isCapturing else { return }
+        isCapturing = true
+
+        pipe = Pipe()
+        originalStderr = dup(STDERR_FILENO)
+        fflush(stderr)
+        dup2(pipe!.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+
+        pipe?.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if let str = String(data: data, encoding: .utf8), !str.isEmpty {
+                callback(str.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+    }
+
+    func stopCapture() {
+        guard isCapturing else { return }
+        fflush(stderr)
+        dup2(originalStderr, STDERR_FILENO)
+        pipe?.fileHandleForReading.readabilityHandler = nil
+        pipe?.fileHandleForReading.closeFile()
+        pipe = nil
+        isCapturing = false
+    }
+}
+
+public class SwiftFacebookAppEventsPlugin: NSObject, FlutterPlugin {
+    private var channel: FlutterMethodChannel?
+    private let logInterceptor = LogInterceptor()
+
+    public static func register(with registrar: FlutterPluginRegistrar) {
+        let channel = FlutterMethodChannel(
+            name: "flutter.oddbit.id/facebook_app_events",
+            binaryMessenger: registrar.messenger()
+        )
+        let instance = SwiftFacebookAppEventsPlugin()
+        instance.channel = channel
+
+        // Required for FB SDK 9.0
         ApplicationDelegate.shared.initializeSDK()
 
         registrar.addMethodCallDelegate(instance, channel: channel)
         registrar.addApplicationDelegate(instance)
+
+        instance.logInterceptor.startCapture { log in
+            channel.invokeMethod("onLog", arguments: ["message": log])
+        }
     }
     
     /// Connect app delegate with SDK
@@ -38,6 +81,11 @@ public class SwiftFacebookAppEventsPlugin: NSObject, FlutterPlugin {
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
+        case "stopLogCapture":
+            logInterceptor.stopCapture()
+            result(nil)
+            break
+
         case "clearUserData":
             handleClearUserData(call, result: result)
             break
@@ -184,7 +232,6 @@ public class SwiftFacebookAppEventsPlugin: NSObject, FlutterPlugin {
         let arguments = call.arguments as? [String: Any] ?? [String: Any]()
         let enabled = arguments["enabled"] as! Bool
         let collectId = arguments["collectId"] as! Bool
-        Settings.shared.isAdvertiserTrackingEnabled = enabled
         Settings.shared.isAdvertiserTrackingEnabled = enabled
         Settings.shared.isAdvertiserIDCollectionEnabled = collectId
         result(nil)
